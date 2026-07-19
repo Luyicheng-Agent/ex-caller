@@ -8,6 +8,8 @@ export interface RollCallAdvancedOption {
   value: string
   /** 此选项在随机时停留的时间（单位：ms） */
   duration: number
+  /** 此选项被抽中的权重（默认 1，必须为正有限数，否则视为 1） */
+  weight?: number
 }
 
 /** 待点选项 */
@@ -41,6 +43,52 @@ export interface RollCallController {
   reset: () => void
 }
 
+/** 获取选项的权重：非有限值或 ≤ 0 时视为 1 */
+function getWeight(option: RollCallOption): number {
+  if (typeof option === 'string')
+    return 1;
+  const w = option.weight;
+  if (w === undefined)
+    return 1;
+  return Number.isFinite(w) && w > 0 ? w : 1;
+}
+
+/** 累计权重与总权重；若所有权重均为默认值 1，则返回 null（保持顺序循环） */
+function buildCumulativeWeights(options: RollCallOption[]): { cumulative: number[], total: number } | null {
+  let allDefault = true;
+  const weights: number[] = [];
+  for (const opt of options) {
+    const w = getWeight(opt);
+    if (w !== 1)
+      allDefault = false;
+    weights.push(w);
+  }
+  if (allDefault)
+    return null;
+  const cumulative: number[] = [];
+  let sum = 0;
+  for (const w of weights) {
+    sum += w;
+    cumulative.push(sum);
+  }
+  return { cumulative, total: sum };
+}
+
+/** 通过逆 CDF + 二分查找从累计权重中抽样，返回被选中的下标 */
+function sampleWeighted(cumulative: number[], total: number): number {
+  const r = Math.random() * total;
+  let lo = 0;
+  let hi = cumulative.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (cumulative[mid] < r)
+      lo = mid + 1;
+    else
+      hi = mid;
+  }
+  return lo;
+}
+
 /**
  * 点名。
  *
@@ -53,10 +101,18 @@ export default function useRollCall(config: RollCallConfig): Ref<RollCallControl
   const currentValue = ref<string | undefined>(defaultValue);
   const currentDuration = ref(duration);
 
+  // 当任一选项设置了非默认权重时使用加权采样，否则保持顺序循环（向后兼容）
+  const weightedDist = buildCumulativeWeights(options);
+
   const next = () => {
-    let i = (currentIndex.value ?? -1) + 1; // 若未开始，下一个为第一个，即下标 -1+1
-    if (i >= options.length) // 越界
-      i = 0;
+    let i: number;
+    if (weightedDist) {
+      i = sampleWeighted(weightedDist.cumulative, weightedDist.total);
+    } else {
+      i = (currentIndex.value ?? -1) + 1; // 若未开始，下一个为第一个，即下标 -1+1
+      if (i >= options.length) // 越界
+        i = 0;
+    }
     const incoming = options[i]!;
     currentValue.value = rollCallOptionToString(incoming);
     currentIndex.value = i;
